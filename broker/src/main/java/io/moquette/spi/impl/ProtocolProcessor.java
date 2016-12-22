@@ -122,6 +122,7 @@ public class ProtocolProcessor {
 
     protected ConcurrentMap<String, ConnectionDescriptor> connectionDescriptors;
     protected ConcurrentMap<RunningSubscription, SubscriptionState> subscriptionInCourse;
+    protected ConcurrentMap<String, ConnectionDescriptor> reconnectingDescriptors;
 
     private SubscriptionsStore subscriptions;
     private boolean allowAnonymous;
@@ -178,10 +179,13 @@ public class ProtocolProcessor {
               boolean allowZeroByteClientId, IAuthorizator authorizator, BrokerInterceptor interceptor, String serverPort) {
         this.connectionDescriptors = new ConcurrentHashMap<>();
         this.subscriptionInCourse = new ConcurrentHashMap<>();
+        this.reconnectingDescriptors = new ConcurrentHashMap<>();
+
         this.m_interceptor = interceptor;
         this.subscriptions = subscriptions;
         this.allowAnonymous = allowAnonymous;
         this.allowZeroByteClientId = allowZeroByteClientId;
+
         m_authorizator = authorizator;
         LOG.trace("subscription tree on init {}", subscriptions.dumpTree());
         m_authenticator = authenticator;
@@ -240,6 +244,8 @@ public class ProtocolProcessor {
         ConnectionDescriptor existing = this.connectionDescriptors.putIfAbsent(clientID, descriptor);
         if (existing != null) {
             LOG.info("Found an existing connection with same client ID <{}>, forcing to close", msg.getClientID());
+            // Mark the client is a reconnecting client, It will be use in processConnectionLost.
+            reconnectingDescriptors.put(clientID, existing);
             existing.abort();
             return;
         }
@@ -663,8 +669,16 @@ public class ProtocolProcessor {
     }
 
     public void processConnectionLost(String clientID, Channel channel) {
+        LOG.trace("processConnectionLost is invoked with clientID <{}>", clientID);
         ConnectionDescriptor oldConnDescr = new ConnectionDescriptor(clientID, channel, true);
         connectionDescriptors.remove(clientID, oldConnDescr);
+
+        // If the client is reconnecting, just return.
+        if ( reconnectingDescriptors.containsKey(clientID)) {
+            reconnectingDescriptors.remove(clientID);
+            return;
+        }
+
         //publish the Will message (if any) for the clientID
         if (m_willStore.containsKey(clientID)) {
             WillMessage will = m_willStore.get(clientID);
